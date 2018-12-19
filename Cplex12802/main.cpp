@@ -29,9 +29,11 @@ void print_edges(EdgeIter first, EdgeIter last, const Graph& G) {
 	cout << " Number of edges: " << num_edges(G) << std::endl;
 }
 template<class Graph>
-void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatrix F,const Graph &g) {
+void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatrix F,const int k,const Graph &g) {
 	IloEnv env = mod.getEnv();
-
+	int n_colors = Z.getSize();
+	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
+	ColorMap colors = get(edge_color, g);
 	//modelling objective function
 	IloExpr exp(env);
 	int n_vertices = num_vertices(g);
@@ -53,7 +55,9 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatr
 		}
 	}
 	//setting names to labels variables.
-
+	for (int i = 0; i<n_colors; ++i) {
+		Z[i].setName(("z"+std::to_string(i)).c_str());
+	}
 
 
 	//first constraint 
@@ -61,11 +65,12 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatr
 
 	//second constraint
     typedef typename graph_traits<Graph>::vertex_iterator vertex_it;
-	typedef typename graph_traits<Graph>::in_edge_iterator edge_it;
+	typedef typename graph_traits<Graph>::in_edge_iterator in_edge_it;
+	typedef typename graph_traits<Graph>::edge_iterator edge_it;
 	vertex_it vit, vend;
 	std::tie(vit, vend) = vertices(g);
 	for (auto it = ++vit; it != vend; ++it) {
-		edge_it eit, eend;
+		in_edge_it eit, eend;
 		std::tie(eit,eend) = in_edges(*it, g);
 		//cout << "Vertex: " << *it << endl;
 		//cout << "Aresta(s): ";
@@ -82,7 +87,20 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatr
 		texp.end();
 		//cout << endl;
 	}
+	//third constraint
+	for (edge_it it = edges(g).first; it != edges(g).second; ++it) {
+		mod.add(F[source(*it, g)][target(*it, g)] <= n_vertices * Z[colors[*it]]);
+		mod.add(F[target(*it, g)][source(*it, g)] <= n_vertices * Z[colors[*it]]);
+	}
 
+	//forth constraint
+	int f_colors = n_colors - n_vertices+1;
+	IloExpr texp(env);
+	for (int i = 0; i < f_colors; ++i) {
+		texp += Z[i];
+	}
+	mod.add(texp <= k);
+	texp.end();
 
 }
 
@@ -108,15 +126,17 @@ int main()
 	const int colors[] = {H,H,D,D,C,F,E,D,C,F,G,E,A,B,G,A,B};
 
 	Graph g(edge_array,edge_array+n_edges,colors,n_vertices);
-	//add edges to super source vertex index 0. remenber!!!
-	n_edges += n_vertices - 1;
-	for (int i = 1; i < n_vertices; ++i) boost::add_edge(0,i,property<edge_color_t,int>(n_edges+i),g);
+	//add edges to super source vertex index 0. remember!!!
+	std::unordered_set<int> st(colors, colors + sizeof(colors) / sizeof(colors[0]));
+	int n_colors = st.size();
+	st.clear();
+	for (int i = 1; i < n_vertices; ++i) boost::add_edge(0,i,property<edge_color_t,int>(n_colors+i-1),g);
 	std::tie(it, end) = boost::edges(g);
 	print_edges(it, end, g);
+
+
 	//temporario contar numero de cores
-	std::unordered_set<int> st(colors,colors+sizeof(colors)/sizeof(colors[0]));
-	int n_colors =st.size()+n_vertices-1;
-	st.clear();
+	n_colors += n_vertices - 1;
 
 
 	//starting cplex code part
@@ -125,9 +145,19 @@ int main()
 		IloModel model(env);
 		IloBoolVarArray Y(env,n_vertices),Z(env,n_colors);
 		IloVarMatrix    F(env,n_vertices); //each edge has at least a edge to the supersource
-		buildFlowModel(model,Y,Z,F,g);
+		buildFlowModel(model,Y,Z,F,k,g);
 		IloCplex cplex(model);
 		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
+		//cross your fingers
+		cplex.solve();
+		cplex.out() << "solution status = " << cplex.getStatus() << endl;
+
+		cplex.out() << endl;
+		cplex.out() << "Number of components   = " << cplex.getObjValue() << endl;
+		for (int i = 0; i <= Z.getSize() - n_vertices; i++) {
+			cplex.out() << "  Z" << i << " = " << cplex.getValue(Z[i]) << endl;
+		}
+
 	}
 	catch (IloException& e) {
 		cerr << "Concert exception caught: " << e << endl;
