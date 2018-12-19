@@ -60,10 +60,10 @@ int main()
 	const int num_edges = sizeof(edge_array) / sizeof(edge_array[0]);
 	const int colors[] = {H,H,D,D,C,F,E,D,C,F,G,E,A,B,G,A,B};
 
-	//adicionar arestas do vertice super source 
-
-
 	Graph g(edge_array,edge_array+num_edges,colors,num_vertices);
+	//add edges to super source vertex index 0. remenber!!!
+	for (int i = 1; i < num_vertices; ++i) boost::add_edge(0,i,g);
+
 	std::tie(it, end) = boost::edges(g);
 	print_edges(it, end, g);
 	//starting cplex code part
