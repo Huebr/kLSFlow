@@ -4,9 +4,14 @@
 #include <boost/graph/graph_traits.hpp> // for creation of descriptors vertex and edges.
 #include <boost/graph/adjacency_list.hpp> //for usage of adjacency list
 #include <ilcplex/ilocplex.h>
+#include <unordered_set>
 ILOSTLBEGIN //initialization make vs work properly
 
 using namespace boost;
+
+//basic definitions
+typedef IloArray<IloNumVarArray> IloVarMatrix;
+
 
 //template function to print edges.
 template<class EdgeIter,class Graph>
@@ -24,7 +29,7 @@ void print_edges(EdgeIter first, EdgeIter last, const Graph& G) {
 	cout << " Number of edges: " << num_edges(G) << std::endl;
 }
 template<class Graph>
-void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloNumArray2 F,const Graph &g) {
+void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatrix F,const Graph &g) {
 	IloEnv env = mod.getEnv();
 
 	//modelling objective function
@@ -32,14 +37,56 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloNumArra
 	int n_vertices = num_vertices(g);
 	for (int i = 1; i < n_vertices;++i) {
 		exp += Y[i];
+		Y[i].setName(("y" + std::to_string(i)).c_str());
 	}
-	mod.add(IloMinimize(env,exp ));
+	Y[0].setName("y0");
+	mod.add(IloMinimize(env,exp));
 	exp.end();
+	//modelling f_{ij} temporario ajeitar para deixar mais compactor depois um para cada aresta
 
-	//modelling flow to grant conectivity
+	for (int i = 0; i < n_vertices; ++i){
+		F[i] = IloNumVarArray(env,n_vertices,0,+IloInfinity,ILOFLOAT);
+	}
+	for (int i = 0; i < n_vertices; ++i) {
+		for (int j = 0; j < n_vertices; ++j) {
+			F[i][j].setName(("f_" + std::to_string(i) + "_" + std::to_string(j)).c_str());
+		}
+	}
+	//setting names to labels variables.
+
+
+
+	//first constraint 
+	for(int i =1; i<n_vertices ; ++i)mod.add(F[0][i] <= n_vertices*Y[i] );
+
+	//second constraint
+    typedef typename graph_traits<Graph>::vertex_iterator vertex_it;
+	typedef typename graph_traits<Graph>::in_edge_iterator edge_it;
+	vertex_it vit, vend;
+	std::tie(vit, vend) = vertices(g);
+	for (auto it = ++vit; it != vend; ++it) {
+		edge_it eit, eend;
+		std::tie(eit,eend) = in_edges(*it, g);
+		//cout << "Vertex: " << *it << endl;
+		//cout << "Aresta(s): ";
+		IloExpr texp(env);
+		for (auto tit = eit; tit != eend; ++tit) {
+			texp += F[source(*tit, g)][target(*tit, g)];
+			//cout << *tit;
+		}
+		for (auto tit = eit; tit != eend; ++tit) {
+			texp -= F[target(*tit, g)][source(*tit, g)];
+			//cout << *tit;
+		}
+		mod.add(texp == 1);
+		texp.end();
+		//cout << endl;
+	}
 
 
 }
+
+
 
 
 int main()
@@ -48,7 +95,7 @@ int main()
 	typedef adjacency_list<vecS, vecS, undirectedS, no_property, property<edge_color_t, int>> Graph;
 	typedef std::pair<int, int> Edge;
 	Graph::edge_iterator it, end;
-	const int num_vertices = 14;
+	const int n_vertices = 14;
 	const int k = 4;
 	Edge edge_array[] = {
 		Edge(1,2),  Edge(1,12), Edge(2,3),  Edge(3,4),
@@ -57,28 +104,30 @@ int main()
 		Edge(8,9),  Edge(9,10), Edge(10,11),Edge(11,12),
 		Edge(12,13),
 	};
-	const int num_edges = sizeof(edge_array) / sizeof(edge_array[0]);
+	int n_edges = sizeof(edge_array) / sizeof(edge_array[0]);
 	const int colors[] = {H,H,D,D,C,F,E,D,C,F,G,E,A,B,G,A,B};
 
-	Graph g(edge_array,edge_array+num_edges,colors,num_vertices);
+	Graph g(edge_array,edge_array+n_edges,colors,n_vertices);
 	//add edges to super source vertex index 0. remenber!!!
-	for (int i = 1; i < num_vertices; ++i) boost::add_edge(0,i,g);
-
+	n_edges += n_vertices - 1;
+	for (int i = 1; i < n_vertices; ++i) boost::add_edge(0,i,property<edge_color_t,int>(n_edges+i),g);
 	std::tie(it, end) = boost::edges(g);
 	print_edges(it, end, g);
-	//starting cplex code part
+	//temporario contar numero de cores
+	std::unordered_set<int> st(colors,colors+sizeof(colors)/sizeof(colors[0]));
+	int n_colors =st.size()+n_vertices-1;
+	st.clear();
 
+
+	//starting cplex code part
 	IloEnv   env; //environment
 	try {
 		IloModel model(env);
-		IloBoolVarArray Y(env,num_vertices),Z(env,13);
-		IloNumArray2    F(env,num_vertices);
-		for (int i = 0; i < num_vertices; ++i) { //ajeitar para o numero de arestas
-			F[i] = IloNumArray(env,num_vertices,0,+IloInfinity);
-		}
+		IloBoolVarArray Y(env,n_vertices),Z(env,n_colors);
+		IloVarMatrix    F(env,n_vertices); //each edge has at least a edge to the supersource
 		buildFlowModel(model,Y,Z,F,g);
 		IloCplex cplex(model);
-		cplex.exportModel("kSLF_fluxo.lp");
+		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
 	}
 	catch (IloException& e) {
 		cerr << "Concert exception caught: " << e << endl;
