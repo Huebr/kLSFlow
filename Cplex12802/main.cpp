@@ -159,7 +159,7 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 		IloVarMatrix    F(env, n_vertices); //each edge has at least a edge to the supersource
 		buildFlowModel(model, Y, Z, F, k, g);
 		IloCplex cplex(model);
-		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
+		//cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
 											//cross your fingers
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
@@ -169,7 +169,10 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 		db temp(n_colors);
 		cplex.out() << "color(s) solution:";
 		for (int i = 0; i < Z.getSize() - n_vertices + 1; i++) {
-			if (cplex.getValue(Z[i]))cplex.out() << " " << i;
+			if (cplex.getValue(Z[i])) {
+				cplex.out() << " " << i;
+				temp.set(i);
+			}
 		}
 		cplex.out() << endl;
 		cplex.out() << "root(s) solution:";
@@ -177,7 +180,7 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 			if (cplex.getValue(Y[i]))cplex.out() << " " << i;
 		}
 		cplex.out() << endl;
-
+		print_filtered_graph(g,temp);
 	}
 	catch (IloException& e) {
 		cerr << "Concert exception caught: " << e << endl;
