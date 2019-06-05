@@ -6,6 +6,9 @@
 #include <boost/graph/graphml.hpp>
 #include <boost/graph/connected_components.hpp>
 #include <ilcplex/ilocplex.h>
+#include <boost/pending/disjoint_sets.hpp>
+#include <boost/graph/incremental_components.hpp>
+#include <boost/graph/copy.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -71,8 +74,390 @@ void print_edges(EdgeIter first, EdgeIter last, const Graph& G) {
 		std::cout << "Vertex " << i << " is in component " << components[i] << std::endl;
 	std::cout << std::endl;
 }
+template<class Graph, class Mask>
+int get_components(Graph &g, Mask &m, vector<int> &components) {
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef typename boost::dynamic_bitset<> db;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	valid_edge_color<EdgeColorMap, Mask> filter(get(edge_color, g), m);
+	fg tg(g, filter);
+	int num = connected_components(tg, &components[0]);
+	return num;
+}
+
+//MVCA modified always has k colors
+template <class Graph>
+int kLSFMVCA(Graph &g, int k_sup, int n_labels) {
+	std::vector<int> components(num_vertices(g));
+	db temp(n_labels);
+	int f_colors = size - num_vertices(g) + 1;
+	int num_c = get_components(g, temp, components);
+	int num_c_best = num_c;
+	while (temp.count() < k_sup) {
+		int best_label = 0;
+		for (int i = 0; i < f_colors; ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				int nc = get_components(g, temp, components);
+				if (nc <= num_c_best) {
+					num_c_best = nc;
+					best_label = i;
+				}
+				temp.flip(i);
+			}
+		}
+		temp.set(best_label);
+	}
+	num_c_best = get_components(g, temp, components);
+	//print_filtered_graph(g,temp);
+	return  num_c_best;//just to be right
+}
+
+template <class Graph>
+db MkLSFMVCA(Graph &g, int k_sup, int n_labels) {
+	std::vector<int> components(num_vertices(g));
+	int f_colors = size - num_vertices(g) + 1;
+	db temp(n_labels);
+	int num_c = get_components(g, temp, components);
+	int num_c_best = num_c;
+	while (temp.count() < k_sup) {
+		int best_label = 0;
+		for (int i = 0; i < f_colors; ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				int nc = get_components(g, temp, components);
+				if (nc <= num_c_best) {
+					num_c_best = nc;
+					best_label = i;
+				}
+				temp.flip(i);
+			}
+		}
+		temp.set(best_label);
+	}
+	//num_c_best = get_components(g, temp, components);
+	//print_filtered_graph(g,temp);
+	return  temp;//just to be right
+}
+
+int root(int current, std::vector<int> &parent) {
+	while (parent[current] != current) {
+		current = parent[current];
+	}
+	return current;
+}
+
 template<class Graph>
-void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatrix F,const int k,const Graph &g) {
+int max_reduce(Graph &g, int n_curr, int n_colors, std::vector<int> &comp, int label) {
+	std::vector<int> parent(n_curr), level(n_curr);
+	volatile int comp_a, comp_b; //so i could debug dont know why.
+	int result;
+	for (int i = 0; i < n_curr; ++i) {
+		parent[i] = i;
+		level[i] = 0;
+	}
+	result = 0;
+
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	db mask(n_colors);
+	mask.set(label);
+	valid_edge_color<EdgeColorMap, db> filter(get(edge_color, g), mask);
+	fg G(g, filter);
+	std::tie(it, end) = boost::edges(G);
+
+	while (it != end) {
+		comp_a = comp[source(*it, G)];
+		comp_b = comp[target(*it, G)];
+		if (comp_a != comp_b) {
+			volatile int root_a, root_b;
+			root_a = root(comp_a, parent);
+			root_b = root(comp_b, parent);
+			if (root(comp_a, parent) != root(comp_b, parent)) {
+				if (level[root(comp_a, parent)] > level[root(comp_b, parent)]) parent[root(comp_b, parent)] = root(comp_a, parent);
+				else {
+					if (level[root(comp_a, parent)] == level[root(comp_b, parent)]) {
+						level[root(comp_b, parent)]++;
+					}
+					parent[root(comp_a, parent)] = root(comp_b, parent);
+				}
+				result++;
+			}
+		}
+		++it;
+	}
+	return result;
+}
+
+typedef typename adjacency_list<multisetS, vecS, undirectedS, no_property, property<edge_color_t, int>> graph_t;
+
+template<class Graph>
+property_map<graph_t, edge_color_t>::type get_colors(Graph &g) {
+	typedef typename property_map<Graph, edge_color_t>::type ColorMap;
+	ColorMap colors = get(edge_color, g);
+	//make color type generic
+	return colors;
+}
+
+
+ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
+	int size = z.getSize();
+	db temp(size);
+	std::vector<int> components(num_vertices(g));
+	auto colors = get_colors(g);
+	graph_traits<graph_t>::edge_iterator it, end;
+	for (int i = 0; i < size; ++i) { //using colors of original graph
+		if (getValue(z[i]) >= 0.1f) temp.set(i);
+	}
+	//std::cout << " user cutting" << std::endl;
+	int no = get_components(g, temp, components);
+	int num_c_best = no;
+
+	//boost::random::mt19937 rng;
+						// see pseudo-random number generators
+	// distribution that maps to 1..6
+	// see random number distributions
+	int best_label = -1;// produces randomness out of thin air	
+	while (num_c_best >= 2 && temp.count() < z.getSize()) {//peharps temp.count() < k_sup
+		/*boost::random::uniform_int_distribution<> gen(0, size-1);
+		int i = gen(rng);
+		if (!temp.test(i))temp.set(i);
+		*/
+		int diff;
+		int best_diff = num_vertices(g);
+		no = num_c_best;
+		best_label = -1;
+		for (int i = 0; i < z.getSize(); ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				num_c_best = get_components(g, temp, components);
+				diff = no - num_c_best;
+				if (diff < best_diff) {
+					best_diff = diff;
+					best_label = i;
+					temp.flip(i);
+					break;
+				}
+				temp.flip(i);
+			}
+		}
+		if (best_label >= 0)temp.set(best_label);
+		num_c_best = get_components(g, temp, components);
+	}
+	if (best_label >= 0)temp.flip(best_label);
+	num_c_best = get_components(g, temp, components);
+	if (num_c_best > 1) {
+		//std::cout << "add user cut" << std::endl;
+		//db temp1(size);
+		std::tie(it, end) = edges(g);
+		IloExpr expr(getEnv());
+		vector<db> masks(num_c_best);
+		for (int i = 0; i < num_c_best; ++i) masks[i].resize(size);
+		while (it != end) {
+			if (components[source(*it, g)] != components[target(*it, g)]) {
+				masks[components[source(*it, g)]].set(colors[*it]);
+				masks[components[target(*it, g)]].set(colors[*it]);
+			}
+			++it;
+		}
+		for (int i = 0; i < num_c_best; ++i) {
+			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
+			add(expr >= 1,IloCplex::UseCutFilter);
+			expr.clear();
+		}
+		expr.end();
+	}
+
+
+}
+ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray, z, int, k, graph_t&, g) {
+	int size = z.getSize();
+	db temp(size);
+	int n_vertices = num_vertices(g);
+	std::vector<int> components(n_vertices);
+	auto colors = get_colors(g);
+	graph_traits<graph_t>::edge_iterator it, end;
+	for (int i = 0; i < size; ++i) { //using colors of original graph
+		if (std::abs(getValue(z[i]) - 1) <= 1e-3) temp.set(i);
+	}
+	//std::cout << "lazy cutting"<<std::endl;
+	//if (temp.count() < k)std::cout <<std::endl << "invalid number of colors" << std::endl;
+	int num_c = get_components(g, temp, components);
+	if (num_c > 1) {
+
+		//std::cout << "add cut" << std::endl;
+		db temp1(size);
+		std::tie(it, end) = edges(g);
+		IloExpr expr(getEnv());
+		vector<db> masks(num_c);
+		for (int i = 0; i < num_c; ++i) masks[i].resize(size);
+		while (it != end) {
+			if (components[source(*it, g)] != components[target(*it, g)]) {
+				masks[components[source(*it, g)]].set(colors[*it]);
+				masks[components[target(*it, g)]].set(colors[*it]);
+			}
+			++it;
+		}
+		for (int i = 0; i < num_c; ++i) {
+			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
+			addLocal(expr >= 1);
+			expr.clear();
+		}
+		expr.end();
+	}
+	//else std::cout << "found optimal" << std::endl;
+}
+
+
+// need to think
+ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z, int, k, graph_t&, g) {
+	if (hasIncumbent()) {
+		int n_colors = z.getSize();
+		int f_colors = n_colors - num_vertices(g) + 1;// trying to pick original colors
+		db mask_curr(n_colors);
+		for (int i = 0; i < f_colors; ++i) {
+			volatile float ub = getUB(z[i]);
+			volatile float lb = getLB(z[i]);
+			if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
+				mask_curr.set(i);
+			}
+		}
+		std::vector<int> components(num_vertices(g));// components graph
+		int n_curr = get_components(g, mask_curr, components); //number of components original graph
+		int n_opt = getIncumbentObjValue();
+		int max = 0;
+		//max reduce evaluation
+		volatile int num_undecided_colors = k - mask_curr.count();
+		if (num_undecided_colors > 0) {
+			std::vector<int> tmp(f_colors);
+			for (int i = 0; i < f_colors; ++i) { // need to consider all labels undecided
+				if (!mask_curr.test(i)) {// if color i not set in test
+					max = max_reduce(g, n_curr, n_colors, components, i);
+					tmp.push_back(max);
+				}
+			}
+			std::sort(tmp.begin(), tmp.end(), std::greater<int>());
+			max = 0;
+			for (int i = 0; i < num_undecided_colors; ++i) {
+				max += tmp[i];
+			}
+		}
+		if ((n_curr - max) > n_opt + 1) {
+			prune();
+		}
+	}
+}
+
+// preprocessing functions
+template<class Graph>
+void treefy(Graph& g, int n_colors) {
+	Graph result(num_vertices(g));
+	typedef boost::graph_traits<Graph>::edge_descriptor edge_t;
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	for (int l = 0; l < n_colors; ++l) {
+		db mask(n_colors);
+		mask.set(l);
+		std::vector<int> components(num_vertices(g));// components graph
+		int n_curr = get_components(g, mask, components);
+		std::vector<int> my_mapping(n_curr, -1);
+		for (int u = 0; u < num_vertices(g); ++u) {
+			if (my_mapping[components[u]] == -1)my_mapping[components[u]] = u;
+			else add_edge(my_mapping[components[u]], u, property<edge_color_t, int>(l), result);
+		}
+	}
+	g.clear();
+	copy_graph(result, g);
+}
+template<class Graph>
+void completefy(Graph& g, int n_colors) {
+	Graph result(num_vertices(g));
+	typedef boost::graph_traits<Graph>::edge_descriptor edge_t;
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	for (int l = 0; l < n_colors; ++l) {
+		db mask(n_colors);
+		mask.set(l);
+		std::vector<int> components(num_vertices(g));// components graph
+		int n_curr = get_components(g, mask, components);
+		std::vector<int> my_mapping(n_curr, -1);
+		for (int u = 0; u < num_vertices(g); ++u) {
+			for (int v = u+1; v < num_vertices(g);++v) {
+				if (components[u] == components[v]) {
+					add_edge(u, v, property<edge_color_t, int>(l), result);
+				}
+			}
+		}
+	}
+	g.clear();
+	copy_graph(result, g);
+}
+// preprocessing functions
+template<class Graph>
+void MCR(Graph& g, int n_colors) {
+	Graph result(num_vertices(g));
+	typedef boost::graph_traits<Graph>::edge_descriptor edge_t;
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	for (int l = 0; l < n_colors; ++l) {
+		db mask(n_colors);
+		mask.set(l);
+		valid_edge_color<EdgeColorMap, db> filter(get(edge_color, g), mask);
+		fg H(g, filter);
+		typedef typename property_map<fg, vertex_index_t>::type IndexMap;
+		IndexMap index = get(vertex_index, H);
+		//disjoint_sets ds(num_vertices(g))
+		typedef std::map<int, std::size_t> rank_t; // => order on Element
+		typedef std::map<int, int> parent_t;
+		rank_t rank_map;
+		parent_t parent_map;
+		boost::associative_property_map<rank_t>   rank_pmap(rank_map);
+		boost::associative_property_map<parent_t> parent_pmap(parent_map);
+		boost::disjoint_sets<
+			associative_property_map<rank_t>,
+			associative_property_map<parent_t> > ds(
+				rank_pmap,
+				parent_pmap);
+		//std::vector<Element> elements;
+		//elements.push_back(Element(...));
+		//rank_t rank_map;
+		//parent_t parent_map;
+
+		//boost::associative_property_map<rank_t>   rank_pmap(rank_map);
+		//boost::associative_property_map<parent_t> parent_pmap(parent_map);
+
+		for (int i = 0; i < num_vertices(g); ++i) {
+			ds.make_set(i);
+		}
+		std::tie(it, end) = edges(H);
+		while (it != end) {
+			int u = index[source(*it, H)];
+			int v = index[target(*it, H)];
+			if (ds.find_set(u) != ds.find_set(v)) {
+				add_edge(u, v, property<edge_color_t, int>(l), result);
+				ds.union_set(u, v);
+			}
+			else {
+				std::cout << "MCR removed edge:" << " (" << u << "," << v << ") " << " Color: " << l << std::endl;
+			}
+			++it;
+		}
+	}
+	g.clear();
+	copy_graph(result, g);
+}
+
+
+template<class Graph>
+void buildFlowModel(IloModel mod, IloBoolVarArray Z,IloVarMatrix F,const int k,const Graph &g) {
 	IloEnv env = mod.getEnv();
 	int n_colors = Z.getSize();
 	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
@@ -81,17 +466,16 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatr
 	IloExpr exp(env);
 	int n_vertices = num_vertices(g);
 	int s = n_vertices- 1;//super source
-	for (int i = 0; i < s;++i) {
-		exp += Y[i];
-		Y[i].setName(("y" + std::to_string(i)).c_str());
+	int f_colors = n_colors - n_vertices + 1;
+	for (int i = f_colors; i < n_colors; ++i) {
+		exp += Z[i];
 	}
-	Y[s].setName(("y" + std::to_string(s)).c_str());//super source
 	mod.add(IloMinimize(env,exp));
 	exp.end();
 	//modelling f_{ij} temporario ajeitar para deixar mais compactor depois um para cada aresta
 
 	for (int i = 0; i < n_vertices; ++i){
-		F[i] = IloNumVarArray(env,n_vertices,0,+IloInfinity,ILOFLOAT);
+		F[i] = IloNumVarArray(env,n_vertices,0,n_vertices - 1 ,ILOFLOAT);
 	}
 	for (int i = 0; i < n_vertices; ++i) {
 		for (int j = 0; j < n_vertices; ++j) {
@@ -104,46 +488,70 @@ void buildFlowModel(IloModel mod,IloBoolVarArray Y, IloBoolVarArray Z,IloVarMatr
 	}
 
 
-	//first constraint 
-	for(int i =0; i<s ; ++i)mod.add(F[s][i] <= (n_vertices-1)*Y[i] );
-
+	
+	/*IloExpr exp1(env);
+	for (int i = 0; i < s; ++i) {
+		exp1 += F[s][i];
+	}
+	mod.add(exp1 <= n_vertices/2 + 1);
+	exp1.end();
+	*/
 	//second constraint
+	typedef adjacency_list<setS, vecS, undirectedS, no_property, property<edge_color_t, int>> GraphT;
     typedef typename graph_traits<Graph>::vertex_iterator vertex_it;
+	typedef typename property_map<Graph, vertex_index_t>::type IndexMap;
+	IndexMap index = get(vertex_index, g);
 	typedef typename graph_traits<Graph>::in_edge_iterator in_edge_it;
 	typedef typename graph_traits<Graph>::edge_iterator edge_it;
+	GraphT g2;
+	copy_graph(g,g2);
 	vertex_it vit, vend;
-	std::tie(vit, vend) = vertices(g);
-	for (auto it = vit; it != vend&&*it<s; ++it) {
+	std::tie(vit, vend) = vertices(g2);
+	for (auto it = vit; it != vend; ++it) {
+		if (*it == s) continue;
 		in_edge_it eit, eend;
-		std::tie(eit,eend) = in_edges(*it, g);
+		std::tie(eit,eend) = in_edges(*it, g2);
 		//cout << "Vertex: " << *it << endl;
 		//cout << "Aresta(s): ";
 		IloExpr texp(env);
 		for (auto tit = eit; tit != eend; ++tit) {
-			texp += F[source(*tit, g)][target(*tit, g)];
+			texp += F[source(*tit, g2)][target(*tit, g2)];
 			//cout << *tit;
 		}
 		for (auto tit = eit; tit != eend; ++tit) {
-			texp -= F[target(*tit, g)][source(*tit, g)];
+			texp -= F[target(*tit, g2)][source(*tit, g2)];
 			//cout << *tit;
 		}
+		//if(index[*it]%10==0) mod.add(texp == 1);
+		//else mod.add(texp == 0);
 		mod.add(texp == 1);
 		texp.end();
 		//cout << endl;
 	}
 	//third constraint
-	for (edge_it it = edges(g).first; it != edges(g).second; ++it) {
-		mod.add(F[source(*it, g)][target(*it, g)] <= (n_vertices-1) * Z[colors[*it]]);
-		mod.add(F[target(*it, g)][source(*it, g)] <= (n_vertices-1) * Z[colors[*it]]);
+	for (int u = 0; u < n_vertices;++u) {
+		for (int v = u + 1; v < n_vertices; ++v) {
+			if (edge(u, v, g).second) {
+				IloExpr texp(env);
+				typedef typename graph_traits<Graph>::out_edge_iterator out_edge_it;
+				out_edge_it oit, oend;
+				std::tie(oit, oend) = edge_range(u,v,g);
+				while (oit != oend) {
+					texp += Z[colors[*oit]];
+					oit++;
+				}
+				mod.add(F[u][v] <= (n_vertices - 1) * texp);
+				mod.add(F[v][u] <= (n_vertices - 1) * texp);
+			}
+		}
 	}
 
 	//forth constraint
-	int f_colors = n_colors - n_vertices+1;
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
 		texp += Z[i];
 	}
-	mod.add(texp <= k);
+	mod.add(texp == k);
 	texp.end();
 
 }
@@ -155,12 +563,48 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 	IloEnv   env; //environment
 	try {
 		IloModel model(env);
-		IloBoolVarArray Y(env, n_vertices), Z(env, n_colors);
+		IloBoolVarArray Z(env, n_colors);
+		IloNumArray pri(env, n_colors);
 		IloVarMatrix    F(env, n_vertices); //each edge has at least a edge to the supersource
-		buildFlowModel(model, Y, Z, F, k, g);
+		buildFlowModel(model,Z, F, k, g);
 		IloCplex cplex(model);
+		int f_colors = n_colors - num_vertices(g) + 1;
 		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
 											//cross your fingers
+		db temppri = MkLSFMVCA(g,k, n_colors);
+		{//set priorities number edges by color.
+			auto it = boost::edges(g).first;
+			auto end = boost::edges(g).second;
+			auto colormap = get(edge_color, g);
+			while (it != end) {
+				pri[colormap[*it]]++;
+				++it;
+			}
+		}
+		for (int i = 0; i < n_colors- num_vertices(g); ++i) {
+			if (temppri.test(i)) {
+				pri[i] += num_edges(g);
+			}
+		}
+
+		//trying to disable automatic cuts
+		//cplex.setParam(IloCplex::Param::MIP::Limits::CutPasses,-1);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 1);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g, k, n_colors) - 1);
+		cplex.setParam(IloCplex::Param::Threads, 8);
+		cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
+		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
+		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
+		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
+		cplex.setParam(IloCplex::Param::Emphasis::MIP, 1);
+		cplex.use(MyBranchStrategy(env, Z, k, g));
+		//cplex.use(LazyCallback(env, Z, k, g));
+		//TODO add MIP start
+		// add set limit time
+		cplex.setParam(IloCplex::TiLim, 7300);
+		//set priorities to colors with more edges.
+		cplex.setPriorities(Z, pri);
+		cplex.use(MyNewCuts(env, Z, g));
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
 
@@ -169,12 +613,12 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 		db temp(n_colors);
 		cplex.out() << "color(s) solution:";
 		for (int i = 0; i < Z.getSize() - n_vertices + 1; i++) {
-			if (cplex.getValue(Z[i]))cplex.out() << " " << i;
+			if (std::abs( cplex.getValue(Z[i])-1.0f)<=1e-3)cplex.out() << " " << i;
 		}
 		cplex.out() << endl;
 		cplex.out() << "root(s) solution:";
-		for (int i = 0; i < Y.getSize() - 1; i++) {
-			if (cplex.getValue(Y[i]))cplex.out() << " " << i;
+		for (int i = num_vertices(g); i < Z.getSize(); i++) {
+			if (std::abs(cplex.getValue(Z[i]) - 1.0f) <= 1e-3)cplex.out() << " " << i;
 		}
 		cplex.out() << endl;
 
@@ -192,7 +636,7 @@ void solveModel(int n_vertices,int n_colors,int k,Graph &g) {
 
 int main(int argc, const char *argv[])
 {
-	typedef adjacency_list<vecS, vecS, undirectedS, no_property, property<edge_color_t, int>> Graph;
+	typedef adjacency_list<multisetS, vecS, undirectedS, no_property, property<edge_color_t, int>> Graph;
 	typedef std::pair<int, int> Edge;
 	typedef boost::graph_traits<Graph>::vertex_descriptor vertex_t;
 	Graph::edge_iterator it, end;
@@ -246,8 +690,16 @@ int main(int argc, const char *argv[])
 				vertex_t u = add_vertex(g);
 				n_vertices++;
 				for (int i = 0; i < n_vertices - 1; ++i) boost::add_edge(u, i, property<edge_color_t, int>(n_colors++), g);
-				std::tie(it, end) = boost::edges(g);
+				//std::tie(it, end) = boost::edges(g);
 				//print_edges(it, end, g);
+				//MCR(g, n_colors);
+				//treefy(g, n_colors);
+				//completefy(g, n_colors);
+				//auto colors = get(edge_color, g);
+				//dynamic_properties dp;
+				//dp.property("Color", colors);
+				//std::ofstream tmp("out.graphml");
+				//write_graphml(tmp, g, dp, true);
 				solveModel(n_vertices, n_colors, k, g);
 			}
 			else {
