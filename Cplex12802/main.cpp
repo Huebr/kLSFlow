@@ -15,6 +15,8 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/graph/filtered_graph.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
 #include <boost/exception/all.hpp>
 #include <exception>
 #include <vector>
@@ -201,35 +203,27 @@ property_map<graph_t, edge_color_t>::type get_colors(Graph &g) {
 	return colors;
 }
 
-
-ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
-	int size = z.getSize();
-	db temp(size);
+template<class Graph,class Model,class Mask>
+void generateCuts(Graph g, Model &mod,Mask temp,int n_colors,IloBoolVarArray& z) {
 	std::vector<int> components(num_vertices(g));
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
-	for (int i = 0; i < size; ++i) { //using colors of original graph
-		if (getValue(z[i]) >= 0.1f) temp.set(i);
-	}
 	//std::cout << " user cutting" << std::endl;
 	int no = get_components(g, temp, components);
 	int num_c_best = no;
-
-	//boost::random::mt19937 rng;
-	// see pseudo-random number generators
-	// distribution that maps to 1..6
-	// see random number distributions
-	int best_label = -1;// produces randomness out of thin air	
-	while (num_c_best >= 2 && temp.count() < z.getSize()) {//peharps temp.count() < k_sup
+	int best_label = -1;
+	boost::random::mt19937 gen(std::time(0));
+	boost::random::uniform_int_distribution<> dist(3, 10);
+	int i = dist(gen);
+	while (num_c_best >= i) {//peharps temp.count() < k_sup
 														   /*boost::random::uniform_int_distribution<> gen(0, size-1);
-														   int i = gen(rng);
-														   if (!temp.test(i))temp.set(i);
+														   int i = gen(rng);													   if (!temp.test(i))temp.set(i);
 														   */
 		int diff;
 		int best_diff = num_vertices(g);
 		no = num_c_best;
 		best_label = -1;
-		for (int i = 0; i < z.getSize(); ++i) {
+		for (int i = 0; i < n_colors; ++i) {
 			if (!temp.test(i)) {
 				temp.set(i);
 				num_c_best = get_components(g, temp, components);
@@ -252,9 +246,9 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 		//std::cout << "add user cut" << std::endl;
 		//db temp1(size);
 		std::tie(it, end) = edges(g);
-		IloExpr expr(getEnv());
+		IloExpr expr(mod.getEnv());
 		vector<db> masks(num_c_best);
-		for (int i = 0; i < num_c_best; ++i) masks[i].resize(size);
+		for (int i = 0; i < num_c_best; ++i) masks[i].resize(n_colors);
 		while (it != end) {
 			if (components[source(*it, g)] != components[target(*it, g)]) {
 				masks[components[source(*it, g)]].set(colors[*it]);
@@ -263,8 +257,8 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 			++it;
 		}
 		for (int i = 0; i < num_c_best; ++i) {
-			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
-			add(expr >= 1, IloCplex::UseCutFilter);
+			for (int j = 0; j < n_colors; ++j) if (masks[i].test(j))expr += z[j];
+			mod.add(expr >= 1);
 			expr.clear();
 		}
 		expr.end();
@@ -272,83 +266,8 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 
 
 }
-ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray, z, int, k, graph_t&, g) {
-	int size = z.getSize();
-	db temp(size);
-	int n_vertices = num_vertices(g);
-	std::vector<int> components(n_vertices);
-	auto colors = get_colors(g);
-	graph_traits<graph_t>::edge_iterator it, end;
-	for (int i = 0; i < size; ++i) { //using colors of original graph
-		if (std::abs(getValue(z[i]) - 1) <= 1e-3) temp.set(i);
-	}
-	//std::cout << "lazy cutting"<<std::endl;
-	//if (temp.count() < k)std::cout <<std::endl << "invalid number of colors" << std::endl;
-	int num_c = get_components(g, temp, components);
-	if (num_c > 1) {
-
-		//std::cout << "add cut" << std::endl;
-		db temp1(size);
-		std::tie(it, end) = edges(g);
-		IloExpr expr(getEnv());
-		vector<db> masks(num_c);
-		for (int i = 0; i < num_c; ++i) masks[i].resize(size);
-		while (it != end) {
-			if (components[source(*it, g)] != components[target(*it, g)]) {
-				masks[components[source(*it, g)]].set(colors[*it]);
-				masks[components[target(*it, g)]].set(colors[*it]);
-			}
-			++it;
-		}
-		for (int i = 0; i < num_c; ++i) {
-			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
-			addLocal(expr >= 1);
-			expr.clear();
-		}
-		expr.end();
-	}
-	//else std::cout << "found optimal" << std::endl;
-}
 
 
-// need to think
-ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z, int, k, graph_t&, g) {
-	if (hasIncumbent()) {
-		int n_colors = z.getSize();
-		int f_colors = n_colors - num_vertices(g) + 1;// trying to pick original colors
-		db mask_curr(n_colors);
-		for (int i = 0; i < f_colors; ++i) {
-			volatile float ub = getUB(z[i]);
-			volatile float lb = getLB(z[i]);
-			if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
-				mask_curr.set(i);
-			}
-		}
-		std::vector<int> components(num_vertices(g));// components graph
-		int n_curr = get_components(g, mask_curr, components); //number of components original graph
-		int n_opt = getIncumbentObjValue();
-		int max = 0;
-		//max reduce evaluation
-		volatile int num_undecided_colors = k - mask_curr.count();
-		if (num_undecided_colors > 0) {
-			std::vector<int> tmp(f_colors);
-			for (int i = 0; i < f_colors; ++i) { // need to consider all labels undecided
-				if (!mask_curr.test(i)) {// if color i not set in test
-					max = max_reduce(g, n_curr, n_colors, components, i);
-					tmp.push_back(max);
-				}
-			}
-			std::sort(tmp.begin(), tmp.end(), std::greater<int>());
-			max = 0;
-			for (int i = 0; i < num_undecided_colors; ++i) {
-				max += tmp[i];
-			}
-		}
-		if ((n_curr - max) > n_opt + 1) {
-			prune();
-		}
-	}
-}
 
 // preprocessing functions
 template<class Graph>
@@ -499,6 +418,7 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 		std::tie(eit, eend) = in_edges(*it, g);
 		for (auto tit = eit; tit != eend; ++tit) {
 			lhs += F[source(*tit, g)][target(*tit, g)];
+			//new constraint 1
 			if (source(*tit, g) != s) {
 				lhs -= F[target(*tit, g)][source(*tit, g)];
 			}
@@ -526,13 +446,56 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 	for (int i = f_colors; i < n_colors; ++i) {
 		mod.add(F[s][i - f_colors] <= (n_vertices-1)*Z[i]);
 	}
+	//new constraint 1
+	// first constraint
+	/*IloExpr lhsNew(env);
+	std::tie(vit, vend) = vertices(g);
 
+	for (auto it = vit; it != vend && *it != s; ++it) {
+		std::tie(eit, eend) = in_edges(*it, g);
+		for (auto tit = eit; tit != eend; ++tit) {
+			if(source(*tit, g)!=s)lhsNew += F[source(*tit, g)][target(*tit, g)];
+		}
+		//if(index[*it]%10==0) mod.add(texp == 1);
+		//else mod.add(texp == 0);
+		int u = static_cast<int>(*it);
+		mod.add(lhsNew <=(n_vertices-1)*(1-Z[f_colors+u]));
+		lhsNew.clear();
+	}
+	lhsNew.end();
+	*/
+	/*IloExpr exptreecut(env);
+	auto [it, end] = edges(g);
+	while (it != end) {
+		exptreecut += Z[colors[*it]];
+		++it;
+	}
+	int N = num_vertices(g) - 1;
+	mod.add(exptreecut >= N);
+	exptreecut.end();*/
+	//constraint every vertex has a colored edge incident
+	auto [first_vertex, last_vertex] = vertices(g);
+	while (first_vertex != last_vertex) {
+		db used_colors(n_colors);
+		auto[first_edge, last_edge] = in_edges(*first_vertex,g);
+		IloExpr expInEdges(env);
+		while (first_edge != last_edge) {
+			volatile int idx = colors[*first_edge];
+			if (!used_colors.test_set(idx,1)) {
+				expInEdges += Z[colors[*first_edge]];
+			}
+			first_edge++;
+		}
+		mod.add(expInEdges >= 1);
+		expInEdges.end();
+		first_vertex++;
+	}
 	//forth constraint
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
 		texp += Z[i];
 	}
-	mod.add(texp <= k);
+	mod.add(texp == k);
 	texp.end();
 
 }
@@ -548,6 +511,17 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		IloNumArray pri(env, n_colors);
 		IloVarMatrix    F(env, n_vertices); //each edge has at least a edge to the supersource
 		buildFlowModel(model, Z, F, k, g);
+		std::vector<Graph> monocromatic_graphs(n_colors,Graph(n_vertices));
+		//creating new colored graphs mantain
+		for (auto elem : monocromatic_graphs) {
+
+		}
+
+		/*for (int c = 0; c < n_colors;c++) {
+			db mask(n_colors);
+			mask.set(c);
+			generateCuts(g, model, mask, n_colors, Z);
+		}*/
 		IloCplex cplex(model);
 		int f_colors = n_colors - num_vertices(g) + 1;
 		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
@@ -564,15 +538,19 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 
 		//trying to disable automatic cuts
 		//cplex.setParam(IloCplex::Param::MIP::Limits::CutPasses,-1);
-		//cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 1);
-		//cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g, k, n_colors)-1);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 1);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g, k, n_colors)-1);
 		//cplex.setParam(IloCplex::Param::Threads, 8);
 		//cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
 		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
 		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
+		//cplex.setParam(IloCplex::Param::Tune::TimeLimit, 1e3);
 		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
+		cplex.setParam(IloCplex::Param::Parallel, -1);
 		cplex.setParam(IloCplex::Param::Emphasis::MIP, 1);
 		cplex.setParam(IloCplex::Param::Benders::Strategy,3);
+		cplex.setParam(IloCplex::Param::MIP::Limits::Nodes, 1);
+		//cplex.setParam(IloCplex::Param::MIP::Strategy::RINSHeur, 1);
 		//cplex.use(MyBranchStrategy(env, Z, k, g));
 		//cplex.use(LazyCallback(env, Z, k, g));
 		//TODO add MIP start
@@ -581,7 +559,9 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		//set priorities to colors with more edges.
 		//cplex.setPriorities(Z, pri);
 		//cplex.use(MyNewCuts(env, Z, g));
+		//cplex.tuneParam(IloCplex::Param::Benders::Strategy);
 		cplex.solve();
+		//cplex.exportModel("kSLF_fluxo_after_presolve.lp");
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
 
 		cplex.out() << endl;
@@ -597,7 +577,6 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 			if (std::abs(cplex.getValue(Z[i]) - 1.0f) <= 1e-3)cplex.out() << " " << i- num_vertices(g);
 		}
 		cplex.out() << endl;
-
 	}
 	catch (IloException& e) {
 		cerr << "Concert exception caught: " << e << endl;
@@ -668,7 +647,7 @@ int main(int argc, const char *argv[])
 				for (int i = 0; i < n_vertices - 1; ++i) boost::add_edge(u, i, property<edge_color_t, int>(n_colors++), g);
 				//std::tie(it, end) = boost::edges(g);
 				//print_edges(it, end, g);
-				//MCR(g, n_colors);
+				MCR(g, n_colors);
 				//treefy(g, n_colors);
 				//completefy(g, n_colors);
 				//auto colors = get(edge_color, g);
