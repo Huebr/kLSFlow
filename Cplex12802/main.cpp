@@ -512,9 +512,12 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		IloVarMatrix    F(env, n_vertices); //each edge has at least a edge to the supersource
 		buildFlowModel(model, Z, F, k, g);
 		std::vector<Graph> monocromatic_graphs(n_colors,Graph(n_vertices));
-		//creating new colored graphs mantain
-		for (auto elem : monocromatic_graphs) {
-
+		//creating new colored graphs mantain diferent colors
+		auto [it_edges,last_edge] = edges(g);
+		auto colors = get(edge_color, g);
+		while (it_edges!=last_edge) {
+			add_edge(source(*it_edges,g), target(*it_edges, g),property<edge_color_t>(colors[*it_edges]), monocromatic_graphs[colors[*it_edges]]);
+			it_edges++;
 		}
 
 		/*for (int c = 0; c < n_colors;c++) {
