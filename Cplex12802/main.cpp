@@ -29,6 +29,8 @@ typedef IloArray<IloNumVarArray> IloVarMatrix;
 
 
 typedef dynamic_bitset<> db;
+typedef std::map<int, std::size_t> rank_t; // => order on Element
+typedef std::map<int, int> parent_t;
 
 template <typename EdgeColorMap, typename ValidColorsMap>
 struct valid_edge_color {
@@ -334,8 +336,7 @@ void MCR(Graph& g, int n_colors) {
 		typedef typename property_map<fg, vertex_index_t>::type IndexMap;
 		IndexMap index = get(vertex_index, H);
 		//disjoint_sets ds(num_vertices(g))
-		typedef std::map<int, std::size_t> rank_t; // => order on Element
-		typedef std::map<int, int> parent_t;
+	
 		rank_t rank_map;
 		parent_t parent_map;
 		boost::associative_property_map<rank_t>   rank_pmap(rank_map);
@@ -376,12 +377,21 @@ void MCR(Graph& g, int n_colors) {
 
 
 template<class Graph> // dont work with multigraph
-void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k, const Graph &g) {
+void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k, const Graph &g,int opt) {
 	IloEnv env = mod.getEnv();
 	int n_colors = Z.getSize();
 	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
 	typedef typename graph_traits<Graph>::edge_descriptor edge_desc;
 	ColorMap colors = get(edge_color, g);
+	/*std::vector<Graph> monocromatic_graphs(n_colors, Graph(num_vertices(g)));
+	//creating new colored graphs mantain diferent colors
+	auto[it_edges, last_edge] = edges(g);
+	ColorMap colors = get(edge_color, g);
+	while (it_edges != last_edge) {
+		add_edge(source(*it_edges, g), target(*it_edges, g), property<edge_color_t, int>(colors[*it_edges]), monocromatic_graphs[colors[*it_edges]]);
+		it_edges++;
+	}*/
+
 	//modelling objective function
 	IloExpr exp(env);
 	int n_vertices = num_vertices(g);
@@ -389,10 +399,11 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 	int f_colors = n_colors - n_vertices + 1;
 	for (int i = f_colors; i < n_colors; ++i) {
 		exp += Z[i];
-		
 	}
 	mod.add(IloMinimize(env, exp));
-	exp.end();
+	//mod.add(exp>=40);
+	//mod.add(exp == 1);
+	//exp.end();
 	//modelling f_{ij} temporario ajeitar para deixar mais compactor depois um para cada aresta
 
 	for (int i = 0; i < n_vertices; ++i) {
@@ -433,19 +444,34 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 
 	edge_desc my_edge;
 	bool result = false;
+	//IloExpr expression1(env);
 	for (int i = 0; i < n_vertices-1; ++i) {
-		for (int j = i+1; j < n_vertices-1; ++j) {
-			std:tie(my_edge, result) = edge(i, j, g);
+		for (int j = 0; j < n_vertices-1; ++j) {
+			std::tie(my_edge, result) = edge(i, j, g);
 			if (result) {
-				mod.add(F[i][j] <= (n_vertices - 1) * Z[colors[my_edge]]);
-				mod.add(F[j][i] <= (n_vertices - 1) * Z[colors[my_edge]]);
+				mod.add(F[i][j]<= (n_vertices - 1) * Z[colors[my_edge]]);
+				//mod.add(F[i][j] + exp <= (n_vertices));
+				//expression1 += F[j][i];
+				//mod.add(IloIfThen(env, Z[colors[my_edge]] == 0, F[j][i] + F[i][j] <= 0 ));
 			}
 		}
+		/*for (int j = 0; j < n_vertices - 1; ++j) {
+		std::tie(my_edge, result) = edge(i, j, g);
+			if (result) {
+				mod.add(F[i][j] <= expression1 + F[s][i]);
+				//mod.add(IloIfThen(env, Z[colors[my_edge]] == 0, F[j][i] + F[i][j] <= 0 ));
+			}
+		}
+		expression1.clear();*/
 	}
+	//expression1.end();
 	//third big-mconstraint
 	for (int i = f_colors; i < n_colors; ++i) {
 		mod.add(F[s][i - f_colors] <= (n_vertices-1)*Z[i]);
+		//mod.add(F[s][i - f_colors] + exp <= (n_vertices));
+		//mod.add(IloIfThen(env,Z[i] == 0, F[s][i - f_colors] <= 0));
 	}
+	exp.end();
 	//new constraint 1
 	// first constraint
 	/*IloExpr lhsNew(env);
@@ -473,6 +499,28 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 	int N = num_vertices(g) - 1;
 	mod.add(exptreecut >= N);
 	exptreecut.end();*/
+	//new constraint dominating colors
+	//strange implementation make it better with contraction
+	/*for (int i = 0; i < n_colors; ++i) {
+		std::vector<int> comps(num_vertices(g));
+		int num_comps = connected_components(monocromatic_graphs[i],&comps[0]);
+		IloExpr domination_expr(env);
+		for (int j = 0; j < n_colors; j++) {
+			if (i != j) {
+				bool rs = false;
+				for (auto it = edges(monocromatic_graphs[j]).first; it != edges(monocromatic_graphs[j]).second;++it) {
+					if (comps[source(*it, monocromatic_graphs[j])]!=comps[target(*it, monocromatic_graphs[j])]) {
+						rs = true;
+						break;
+					}
+				}
+				if (!rs) domination_expr += Z[j];
+			}	
+		}
+		mod.add(domination_expr<=0);
+	}*/
+
+
 	//constraint every vertex has a colored edge incident
 	auto [first_vertex, last_vertex] = vertices(g);
 	while (first_vertex != last_vertex) {
@@ -490,12 +538,26 @@ void buildFlowModel(IloModel mod, IloBoolVarArray Z, IloVarMatrix F, const int k
 		expInEdges.end();
 		first_vertex++;
 	}
+	//new constraint based in monocromatic graphs
+	auto[it_edges1, last_edge1] = edges(g);
+	//ColorMap colors = get(edge_color, g);
+	//não fortalece
+	/*while (it_edges1 != last_edge1) {
+		if (colors[*it_edges1] < f_colors) {
+			int u = colors[edge(s, target(*it_edges1, g), g).first];
+			int v = colors[edge(s, source(*it_edges1, g), g).first];
+			//mod.add(Z[u] + Z[v] + Z[colors[*it_edges1]] <= 2);
+			//if (u < v)mod.add(Z[v] + Z[colors[*it_edges1]] <= 1);
+			//else mod.add(Z[u] + Z[colors[*it_edges1]] <= 1);
+		}
+		it_edges1++;
+	}*/
 	//forth constraint
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
 		texp += Z[i];
 	}
-	mod.add(texp == k);
+	mod.add(texp <= k);
 	texp.end();
 
 }
@@ -510,15 +572,8 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		IloBoolVarArray Z(env, n_colors);
 		IloNumArray pri(env, n_colors);
 		IloVarMatrix    F(env, n_vertices); //each edge has at least a edge to the supersource
-		buildFlowModel(model, Z, F, k, g);
-		std::vector<Graph> monocromatic_graphs(n_colors,Graph(n_vertices));
-		//creating new colored graphs mantain diferent colors
-		auto [it_edges,last_edge] = edges(g);
-		auto colors = get(edge_color, g);
-		while (it_edges!=last_edge) {
-			add_edge(source(*it_edges,g), target(*it_edges, g),property<edge_color_t>(colors[*it_edges]), monocromatic_graphs[colors[*it_edges]]);
-			it_edges++;
-		}
+		int opt = kLSFMVCA(g, k, n_colors) - 1;
+		buildFlowModel(model, Z, F, k, g,opt);
 
 		/*for (int c = 0; c < n_colors;c++) {
 			db mask(n_colors);
@@ -527,9 +582,9 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		}*/
 		IloCplex cplex(model);
 		int f_colors = n_colors - num_vertices(g) + 1;
-		cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
+		//cplex.exportModel("kSLF_fluxo.lp"); // good to see if the model is correct
 											//cross your fingers
-		/*{//set priorities number edges by color.
+		{//set priorities number edges by color.
 			auto it = boost::edges(g).first;
 			auto end = boost::edges(g).second;
 			auto colormap = get(edge_color, g);
@@ -537,13 +592,14 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 				pri[colormap[*it]]++;
 				++it;
 			}
-		}*/
+		}
 
 		//trying to disable automatic cuts
 		//cplex.setParam(IloCplex::Param::MIP::Limits::CutPasses,-1);
-		cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 1);
-		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g, k, n_colors)-1);
-		//cplex.setParam(IloCplex::Param::Threads, 8);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 40);
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, opt);
+		cplex.setParam(IloCplex::Param::Threads, 4);
+		//cplex.setParam(IloCplex::Param::MIP::Strategy::VariableSelect, 3);
 		//cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
 		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
 		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
@@ -552,7 +608,9 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		cplex.setParam(IloCplex::Param::Parallel, -1);
 		cplex.setParam(IloCplex::Param::Emphasis::MIP, 1);
 		cplex.setParam(IloCplex::Param::Benders::Strategy,3);
-		cplex.setParam(IloCplex::Param::MIP::Limits::Nodes, 1);
+		//cplex.setParam(IloCplex::Param::MIP::Limits::Nodes, 1);
+		//std::ofstream LogFile("LogFile.txt");
+		//cplex.setOut(LogFile);
 		//cplex.setParam(IloCplex::Param::MIP::Strategy::RINSHeur, 1);
 		//cplex.use(MyBranchStrategy(env, Z, k, g));
 		//cplex.use(LazyCallback(env, Z, k, g));
@@ -560,7 +618,7 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		// add set limit time
 		cplex.setParam(IloCplex::TiLim, 7300);
 		//set priorities to colors with more edges.
-		//cplex.setPriorities(Z, pri);
+		cplex.setPriorities(Z, pri);
 		//cplex.use(MyNewCuts(env, Z, g));
 		//cplex.tuneParam(IloCplex::Param::Benders::Strategy);
 		cplex.solve();
@@ -571,13 +629,14 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		cplex.out() << "Number of components   = " << cplex.getObjValue() << endl;
 		db temp(n_colors);
 		cplex.out() << "color(s) solution:";
-		for (int i = 0; i < Z.getSize() - n_vertices + 1; i++) {
+		for (int i = 0; i < f_colors; i++) {
 			if (std::abs(cplex.getValue(Z[i]) - 1.0f) <= 1e-3)cplex.out() << " " << i;
 		}
 		cplex.out() << endl;
 		cplex.out() << "root(s) solution:";
-		for (int i = num_vertices(g); i < Z.getSize(); i++) {
-			if (std::abs(cplex.getValue(Z[i]) - 1.0f) <= 1e-3)cplex.out() << " " << i- num_vertices(g);
+		//int f_colors = Z.getSize() - n_vertices + 1;
+		for (int i = f_colors; i < n_colors; i++) {
+			if (std::abs(cplex.getValue(Z[i]) - 1.0f) <= 1e-3)cplex.out() << " " << i - f_colors;
 		}
 		cplex.out() << endl;
 	}
